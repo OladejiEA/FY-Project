@@ -1,17 +1,18 @@
-import os  # Required for os.environ.get
-from flask import Flask, request, jsonify
-import firebase_admin
-from firebase_admin import credentials, firestore
+import os
+from flask import Flask, request, jsonify, send_file
+import csv
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Firebase setup
-CREDS_FILE = "credentials.json"  # Path to Firebase service account key
-cred = credentials.Certificate(CREDS_FILE)
-firebase_admin.initialize_app(cred)
-db = firestore.client()
-vitals_ref = db.collection('vitals')  # Firestore collection name
+# File to store the data
+DATA_FILE = 'vitals.csv'
+
+# Initialize CSV if it doesn’t exist
+if not os.path.exists(DATA_FILE):
+    with open(DATA_FILE, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Timestamp', 'Temperature', 'Blood Oxygen', 'Heart Rate', 'Respiration Rate', 'Blood Pressure'])
 
 # Receive data from ESP32 or Streamlit BP input
 @app.route('/data', methods=['POST'])
@@ -21,7 +22,6 @@ def receive_data():
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
-        # Extract fields with default None if missing
         temperature = data.get('temperature')
         blood_oxygen = data.get('blood_oxygen')
         heart_rate = data.get('heart_rate')
@@ -29,24 +29,27 @@ def receive_data():
         blood_pressure = data.get('blood_pressure')
         timestamp = datetime.now().isoformat()
 
-        # Create a document with data
-        vital_data = {
-            "timestamp": timestamp,
-            "temperature": temperature if temperature is not None else None,
-            "blood_oxygen": blood_oxygen if blood_oxygen != "No data measured" else None,
-            "heart_rate": heart_rate if heart_rate != "No data measured" else None,
-            "respiration_rate": respiration_rate if respiration_rate != "No data measured" else None,
-            "blood_pressure": blood_pressure
-        }
-
-        # Add to Firestore (auto-generates document ID)
-        vitals_ref.add(vital_data)
-        print(f"Appended data: {vital_data}")
+        # Append to CSV
+        with open(DATA_FILE, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([timestamp, temperature, blood_oxygen, heart_rate, respiration_rate, blood_pressure])
+        print(f"Appended data: {timestamp}, {temperature}, {blood_oxygen}, {heart_rate}, {respiration_rate}, {blood_pressure}")
 
         return jsonify({"message": "Data received successfully"}), 200
     except Exception as e:
         print(f"Error in receive_data: {e}")
         return jsonify({"error": str(e)}), 400
+
+# Serve the vitals data as CSV
+@app.route('/vitals', methods=['GET'])
+def get_vitals():
+    try:
+        if os.path.exists(DATA_FILE):
+            return send_file(DATA_FILE, mimetype='text/csv')
+        return jsonify({"error": "No data available"}), 404
+    except Exception as e:
+        print(f"Error in get_vitals: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
