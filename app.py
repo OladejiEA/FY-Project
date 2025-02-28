@@ -1,8 +1,8 @@
+import os  # Required for os.environ.get
 from flask import Flask, request, jsonify
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
-import os
 
 app = Flask(__name__)
 
