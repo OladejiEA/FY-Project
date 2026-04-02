@@ -16,7 +16,7 @@ app = Flask(__name__)
 # ─── DB connection ────────────────────────────────────────────────────────────────
 # Neon (and most hosted PostgreSQL) provides URLs starting with "postgres://"
 # but psycopg2 requires "postgresql://" — fix that automatically.
-_raw_db_url = os.environ.get("postgresql://neondb_owner:npg_axKWDN1Bot0s@ep-sparkling-union-abndhhpn-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require", "")
+_raw_db_url = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_axKWDN1Bot0s@ep-sparkling-union-abndhhpn-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
 if not _raw_db_url:
     raise RuntimeError(
         "\n\n*** DATABASE_URL environment variable is not set! ***\n"
