@@ -16,7 +16,22 @@ app = Flask(__name__)
 # ─── DB connection ────────────────────────────────────────────────────────────────
 # Neon (and most hosted PostgreSQL) provides URLs starting with "postgres://"
 # but psycopg2 requires "postgresql://" — fix that automatically.
+import re as _re
 _raw_db_url = os.environ.get("DATABASE_URL", "")
+
+# ── Startup diagnostic — visible in Render logs ──────────────────────────────
+print("=" * 60)
+print(f"[VitaTrack] DATABASE_URL set: {bool(_raw_db_url)}")
+if _raw_db_url:
+    _masked = _re.sub(r'(:)([^@]+)(@)', r'\1****\3', _raw_db_url)
+    print(f"[VitaTrack] DATABASE_URL (masked): {_masked}")
+    print(f"[VitaTrack] Starts with postgresql://: {_raw_db_url.startswith('postgresql://')}")
+    print(f"[VitaTrack] Starts with postgres://  : {_raw_db_url.startswith('postgres://')}")
+else:
+    print("[VitaTrack] DATABASE_URL is EMPTY — connection will fail")
+print("=" * 60)
+# ─────────────────────────────────────────────────────────────────────────────
+
 if not _raw_db_url:
     raise RuntimeError(
         "\n\n*** DATABASE_URL environment variable is not set! ***\n"
