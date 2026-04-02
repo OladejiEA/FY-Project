@@ -24,8 +24,6 @@ if not _raw_db_url:
         "Connection string (Pooled connection) and add it as DATABASE_URL "
         "in your Render Flask service → Environment.\n"
     )
-DATABASE_URL = _raw_db_url.replace("postgres://", "postgresql://", 1)
-
 def get_db():
     """
     sslmode='require' is mandatory for Neon and harmless for any other
