@@ -14,8 +14,15 @@ from psycopg2.extras import RealDictCursor
 app = Flask(__name__)
 
 # ─── DB connection ────────────────────────────────────────────────────────────────
-# On Render, set environment variable DATABASE_URL to your PostgreSQL connection string
-DATABASE_URL = os.environ.get("postgresql://vitatrack_user:t9bvw3kRCY96AtAKuowGwXDpZeVpMnmk@dpg-d778d19r0fns73e0srv0-a/vitatrack", "postgresql://localhost/vitatrack")
+# Neon (and most hosted PostgreSQL) provides URLs starting with "postgres://"
+# but psycopg2 requires "postgresql://" — fix that automatically.
+_raw_db_url = os.environ.get("DATABASE_URL", "postgresql://vitatrack_user:t9bvw3kRCY96AtAKuowGwXDpZeVpMnmk@dpg-d778d19r0fns73e0srv0-a/vitatrack")
+if not _raw_db_url:
+    raise RuntimeError(
+        "DATABASE_URL is not set. Add it in Render → Flask service → Environment."
+    )
+# Render gives "postgres://..." but psycopg2 needs "postgresql://"
+DATABASE_URL = _raw_db_url.replace("postgres://", "postgresql://", 1)
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
