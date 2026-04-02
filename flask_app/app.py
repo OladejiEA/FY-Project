@@ -14,18 +14,26 @@ from psycopg2.extras import RealDictCursor
 app = Flask(__name__)
 
 # ─── DB connection ────────────────────────────────────────────────────────────────
-# Render sometimes provides DATABASE_URL as "postgres://..." but psycopg2 needs "postgresql://"
-_raw_db_url = os.environ.get("postgresql://vitatrack_user:t9bvw3kRCY96AtAKuowGwXDpZeVpMnmk@dpg-d778d19r0fns73e0srv0-a/vitatrack", "")
+# Neon (and most hosted PostgreSQL) provides URLs starting with "postgres://"
+# but psycopg2 requires "postgresql://" — fix that automatically.
+_raw_db_url = os.environ.get("postgresql://neondb_owner:npg_axKWDN1Bot0s@ep-sparkling-union-abndhhpn-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require", "")
 if not _raw_db_url:
     raise RuntimeError(
         "\n\n*** DATABASE_URL environment variable is not set! ***\n"
-        "On Render: go to your Flask web service → Environment → "
-        "add DATABASE_URL = <Internal Database URL from your PostgreSQL service>\n"
+        "Get your connection string from neon.tech → your project → "
+        "Connection string (Pooled connection) and add it as DATABASE_URL "
+        "in your Render Flask service → Environment.\n"
     )
 DATABASE_URL = _raw_db_url.replace("postgres://", "postgresql://", 1)
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    """
+    sslmode='require' is mandatory for Neon and harmless for any other
+    hosted PostgreSQL. If ?sslmode=require is already in the URL,
+    psycopg2 merges it cleanly with no duplication.
+    """
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor,
+                            sslmode="require")
     return conn
 
 # ─── Schema init ─────────────────────────────────────────────────────────────────
