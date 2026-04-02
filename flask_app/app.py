@@ -16,7 +16,7 @@ app = Flask(__name__)
 # ─── DB connection ────────────────────────────────────────────────────────────────
 # Neon (and most hosted PostgreSQL) provides URLs starting with "postgres://"
 # but psycopg2 requires "postgresql://" — fix that automatically.
-_raw_db_url = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_ODmf4FrtML0u@ep-sparkling-union-abndhhpn-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
+_raw_db_url = os.environ.get("DATABASE_URL", "")
 if not _raw_db_url:
     raise RuntimeError(
         "\n\n*** DATABASE_URL environment variable is not set! ***\n"
@@ -24,14 +24,17 @@ if not _raw_db_url:
         "Connection string (Pooled connection) and add it as DATABASE_URL "
         "in your Render Flask service → Environment.\n"
     )
+DATABASE_URL = _raw_db_url.replace("postgres://", "postgresql://", 1)
+
 def get_db():
     """
-    sslmode='require' is mandatory for Neon and harmless for any other
-    hosted PostgreSQL. If ?sslmode=require is already in the URL,
-    psycopg2 merges it cleanly with no duplication.
+    Connect using the full DATABASE_URL as-is.
+    Neon URLs already contain ?sslmode=require so we must NOT also pass
+    sslmode as a keyword argument — psycopg2 treats the two sources as
+    conflicting and falls back to a localhost connection instead of
+    using the URL. Let the URL carry all connection parameters.
     """
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor,
-                            sslmode="require")
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
 # ─── Schema init ─────────────────────────────────────────────────────────────────
@@ -123,6 +126,43 @@ except Exception as e:
 
 def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
+# DEBUG — visit /debug in browser to diagnose connection issues
+# Remove this route once everything is working
+# ══════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/debug', methods=['GET'])
+def debug():
+    import re
+    raw = os.environ.get("DATABASE_URL", "")
+
+    # Mask the password so credentials aren't exposed
+    masked = re.sub(r'(:)([^@]+)(@)', r'\1****\3', raw) if raw else "NOT SET"
+
+    result = {
+        "DATABASE_URL_set": bool(raw),
+        "DATABASE_URL_masked": masked,
+        "starts_with_postgres": raw.startswith("postgres"),
+        "after_prefix_fix": raw.replace("postgres://", "postgresql://", 1)[:40] + "..." if raw else "N/A",
+    }
+
+    # Try actually connecting
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("SELECT version()")
+        version = cur.fetchone()
+        cur.close()
+        conn.close()
+        result["connection"] = "SUCCESS"
+        result["pg_version"]  = str(version)
+    except Exception as e:
+        result["connection"] = "FAILED"
+        result["error"]      = str(e)
+
+    return jsonify(result), 200
 
 
 # ══════════════════════════════════════════════════════════════════════════════════
