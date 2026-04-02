@@ -14,8 +14,15 @@ from psycopg2.extras import RealDictCursor
 app = Flask(__name__)
 
 # ─── DB connection ────────────────────────────────────────────────────────────────
-# On Render, set environment variable DATABASE_URL to your PostgreSQL connection string
-DATABASE_URL = os.environ.get("postgresql://vitatrack_user:t9bvw3kRCY96AtAKuowGwXDpZeVpMnmk@dpg-d778d19r0fns73e0srv0-a/vitatrack", "postgresql://localhost/vitatrack")
+# Render sometimes provides DATABASE_URL as "postgres://..." but psycopg2 needs "postgresql://"
+_raw_db_url = os.environ.get("postgresql://vitatrack_user:t9bvw3kRCY96AtAKuowGwXDpZeVpMnmk@dpg-d778d19r0fns73e0srv0-a/vitatrack", "")
+if not _raw_db_url:
+    raise RuntimeError(
+        "\n\n*** DATABASE_URL environment variable is not set! ***\n"
+        "On Render: go to your Flask web service → Environment → "
+        "add DATABASE_URL = <Internal Database URL from your PostgreSQL service>\n"
+    )
+DATABASE_URL = _raw_db_url.replace("postgres://", "postgresql://", 1)
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
@@ -147,6 +154,39 @@ def signup():
             cur.close(); conn.close()
 
         return jsonify({"message": "Account created. Awaiting admin approval.", "id": uid}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/auth/verify', methods=['POST'])
+def verify_session():
+    """
+    Called by Streamlit on page refresh to validate a stored cookie.
+    Accepts a user_id and returns the fresh user record if still valid and approved.
+    """
+    try:
+        data    = request.get_json()
+        user_id = data.get('user_id')
+        if not user_id:
+            return jsonify({"error": "user_id required"}), 400
+
+        conn = get_db(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id, full_name, email, role, post, approved, created_at FROM users WHERE id = %s",
+            (user_id,)
+        )
+        user = cur.fetchone()
+        cur.close(); conn.close()
+
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        if not user['approved']:
+            return jsonify({"error": "Account not approved"}), 403
+
+        safe = dict(user)
+        if safe.get('created_at'):
+            safe['created_at'] = safe['created_at'].isoformat()
+        return jsonify({"user": safe}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
