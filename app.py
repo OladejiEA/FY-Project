@@ -13,10 +13,28 @@ from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
+# ─── Global error handlers — always return JSON, never HTML ──────────────────
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify({"error": "Bad request", "detail": str(e)}), 400
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return jsonify({"error": "Method not allowed"}), 405
+
+@app.errorhandler(500)
+def internal_error(e):
+    return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+
 # ─── DB connection ────────────────────────────────────────────────────────────────
 # Neon (and most hosted PostgreSQL) provides URLs starting with "postgres://"
 # but psycopg2 requires "postgresql://" — fix that automatically.
-_raw_db_url = os.environ.get("DATABASE_URL", "postgresql://vitatrack_user:t9bvw3kRCY96AtAKuowGwXDpZeVpMnmk@dpg-d778d19r0fns73e0srv0-a/vitatrack")
+_raw_db_url = os.environ.get("DATABASE_URL", "")
 if not _raw_db_url:
     raise RuntimeError(
         "DATABASE_URL is not set. Add it in Render → Flask service → Environment."
