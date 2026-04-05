@@ -440,6 +440,62 @@ def assign_device():
         return jsonify({"error": str(e)}), 500
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════════
+# PROFILE — change password and photo
+# ══════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/profile/change_password', methods=['POST'])
+def change_password():
+    try:
+        data        = request.get_json()
+        user_id     = data.get('user_id')
+        current_pw  = data.get('current_password', '')
+        new_pw      = data.get('new_password', '')
+
+        if not all([user_id, current_pw, new_pw]):
+            return jsonify({"error": "All fields are required."}), 400
+        if len(new_pw) < 6:
+            return jsonify({"error": "New password must be at least 6 characters."}), 400
+
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT password FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return jsonify({"error": "User not found."}), 404
+        if row['password'] != hash_pw(current_pw):
+            cur.close(); conn.close()
+            return jsonify({"error": "Current password is incorrect."}), 401
+
+        cur.execute("UPDATE users SET password = %s WHERE id = %s",
+                    (hash_pw(new_pw), user_id))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "Password updated successfully."}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/profile/change_photo', methods=['POST'])
+def change_photo():
+    try:
+        data      = request.get_json()
+        user_id   = data.get('user_id')
+        photo_b64 = data.get('photo_b64')
+
+        if not user_id or not photo_b64:
+            return jsonify({"error": "user_id and photo_b64 are required."}), 400
+
+        photo_bytes = base64.b64decode(photo_b64)
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("UPDATE users SET photo = %s WHERE id = %s",
+                    (psycopg2.Binary(photo_bytes), user_id))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "Photo updated successfully."}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ══════════════════════════════════════════════════════════════════════════════════
 # VITALS
 # ══════════════════════════════════════════════════════════════════════════════════
