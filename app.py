@@ -503,20 +503,31 @@ def change_photo():
 @app.route('/data', methods=['POST'])
 def receive_data():
     try:
-        data = request.get_json()
+        data = request.get_json(force=True, silent=True) or {}
+
+        def to_float(val):
+            """Convert value to float, returning None for missing/invalid/N/A."""
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                return f if f >= 0 else None
+            except (ValueError, TypeError):
+                return None  # handles "N/A", "", etc.
+
+        temperature      = to_float(data.get('temperature'))
+        blood_oxygen     = to_float(data.get('blood_oxygen'))
+        heart_rate       = to_float(data.get('heart_rate'))
+        respiration_rate = to_float(data.get('respiration_rate'))
+        blood_pressure   = data.get('blood_pressure')   # kept as text e.g. "120/80"
+        device_id        = str(data.get('device_id', 'UNKNOWN')).strip()
+
         conn = get_db(); cur = conn.cursor()
         cur.execute("""
             INSERT INTO vitals
                 (temperature, blood_oxygen, heart_rate, respiration_rate, blood_pressure, device_id)
             VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            data.get('temperature'),
-            data.get('blood_oxygen'),
-            data.get('heart_rate'),
-            data.get('respiration_rate'),
-            data.get('blood_pressure'),
-            data.get('device_id', 'UNKNOWN')
-        ))
+        """, (temperature, blood_oxygen, heart_rate, respiration_rate, blood_pressure, device_id))
         conn.commit(); cur.close(); conn.close()
         return jsonify({"message": "Data received successfully"}), 200
     except Exception as e:
