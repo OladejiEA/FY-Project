@@ -500,39 +500,48 @@ def change_photo():
 # VITALS
 # ══════════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+# VITALS - RECEIVE DATA (Improved)
+# ═══════════════════════════════════════════════════════════════
 @app.route('/data', methods=['POST'])
 def receive_data():
     try:
         data = request.get_json(force=True, silent=True) or {}
-
+        
         def to_float(val):
-            """Convert value to float, returning None for missing/invalid/N/A."""
-            if val is None:
-                return None
+            if val is None: return None
             try:
                 f = float(val)
                 return f if f >= 0 else None
             except (ValueError, TypeError):
-                return None  # handles "N/A", "", etc.
+                return None
 
-        temperature      = to_float(data.get('temperature'))
-        blood_oxygen     = to_float(data.get('blood_oxygen'))
-        heart_rate       = to_float(data.get('heart_rate'))
+        temperature = to_float(data.get('temperature'))
+        blood_oxygen = to_float(data.get('blood_oxygen'))
+        heart_rate = to_float(data.get('heart_rate'))
         respiration_rate = to_float(data.get('respiration_rate'))
-        blood_pressure   = data.get('blood_pressure')   # kept as text e.g. "120/80"
-        device_id        = str(data.get('device_id', 'UNKNOWN')).strip()
+        blood_pressure = data.get('blood_pressure')
+        device_id = str(data.get('device_id', 'UNKNOWN')).strip().upper()
 
-        conn = get_db(); cur = conn.cursor()
+        # Improved validation
+        if device_id not in ['ARM', 'BELT', 'HUB', 'UNKNOWN']:
+            return jsonify({"error": "Invalid device_id. Use ARM, BELT, HUB or UNKNOWN"}), 400
+
+        conn = get_db()
+        cur = conn.cursor()
         cur.execute("""
-            INSERT INTO vitals
+            INSERT INTO vitals 
                 (temperature, blood_oxygen, heart_rate, respiration_rate, blood_pressure, device_id)
             VALUES (%s, %s, %s, %s, %s, %s)
         """, (temperature, blood_oxygen, heart_rate, respiration_rate, blood_pressure, device_id))
-        conn.commit(); cur.close(); conn.close()
-        return jsonify({"message": "Data received successfully"}), 200
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"message": "Data received successfully", "device_id": device_id}), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-
 
 @app.route('/vitals', methods=['GET'])
 def get_vitals():
@@ -581,7 +590,45 @@ def get_vitals():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ═══════════════════════════════════════════════════════════════
+# NEW: LATEST VITALS FOR HUB (OLED Display)
+# ═══════════════════════════════════════════════════════════════
+@app.route('/latest_vitals', methods=['GET'])
+def latest_vitals():
+    try:
+        conn = get_db()
+        cur = conn.cursor()
 
+        # Latest Temperature from ARM
+        cur.execute("""
+            SELECT temperature FROM vitals 
+            WHERE device_id = 'ARM' 
+            ORDER BY timestamp DESC LIMIT 1
+        """)
+        arm_row = cur.fetchone()
+        temperature = round(arm_row['temperature'], 1) if arm_row and arm_row['temperature'] is not None else None
+
+        # Latest Respiration from BELT
+        cur.execute("""
+            SELECT respiration_rate FROM vitals 
+            WHERE device_id = 'BELT' 
+            ORDER BY timestamp DESC LIMIT 1
+        """)
+        belt_row = cur.fetchone()
+        respiration = int(belt_row['respiration_rate']) if belt_row and belt_row['respiration_rate'] is not None else None
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "temperature": temperature,
+            "respiration": respiration,
+            "status": "success"
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "error"}), 500
+        
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
