@@ -101,6 +101,13 @@ CREATE TABLE IF NOT EXISTS vitals (
     blood_pressure    TEXT,
     device_id         TEXT
 );
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id          SERIAL PRIMARY KEY,
+    message     TEXT NOT NULL,
+    timestamp   TIMESTAMP DEFAULT NOW(),
+    dismissed   BOOLEAN DEFAULT FALSE
+);
 """
 
 def init_db():
@@ -327,7 +334,60 @@ def reject_user(user_id):
     cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
     conn.commit(); cur.close(); conn.close()
     return jsonify({"message": "User removed."}), 200
+    
+@app.route('/alerts', methods=['GET'])
+def get_alerts():
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 100")
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        result = []
+        for row in rows:
+            d = dict(row)
+            if d.get('timestamp'):
+                d['timestamp'] = d['timestamp'].isoformat()
+            result.append(d)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
+
+@app.route('/alerts', methods=['POST'])
+def create_alert():
+    try:
+        data    = request.get_json()
+        message = data.get('message', '').strip()
+        if not message:
+            return jsonify({"error": "message required"}), 400
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("INSERT INTO alerts (message) VALUES (%s)", (message,))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "Alert saved"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/alerts/<int:alert_id>/dismiss', methods=['POST'])
+def dismiss_alert(alert_id):
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("UPDATE alerts SET dismissed = TRUE WHERE id = %s", (alert_id,))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "Alert dismissed"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/alerts/clear', methods=['POST'])
+def clear_alerts():
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("DELETE FROM alerts")
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "All alerts cleared"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ══════════════════════════════════════════════════════════════════════════════════
 # ADMIN — PATIENTS
