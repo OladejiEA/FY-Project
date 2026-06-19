@@ -7,52 +7,65 @@ VitaTrack Flask Backend
 
 from flask import Flask, request, jsonify, send_file, Response
 from datetime import datetime
-import os, hashlib, uuid, io, base64
+import os, hashlib, uuid, io, base64, csv as csv_mod, time
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
-# ─── DB connection ────────────────────────────────────────────────────────────────
-# Neon (and most hosted PostgreSQL) provides URLs starting with "postgres://"
-# but psycopg2 requires "postgresql://" — fix that automatically.
-import re as _re
+# ── Simple in-memory throttle for frequently-polled GET endpoints ─────────────
+_last_request_time = {}
+THROTTLE_SECONDS   = 2  # minimum gap per IP per endpoint
+
+def throttle_check():
+    ip  = request.remote_addr or "unknown"
+    key = f"{ip}:{request.path}"
+    now = time.time()
+    last = _last_request_time.get(key, 0)
+    if now - last < THROTTLE_SECONDS:
+        return jsonify({"error": "Too many requests"}), 429
+    _last_request_time[key] = now
+    return None
+
+@app.before_request
+def before_request():
+    if request.method == "GET" and request.path in ("/alerts", "/vitals"):
+        result = throttle_check()
+        if result:
+            return result
+
+
+# ── Global error handlers — always return JSON, never HTML ────────────────────
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify({"error": "Bad request", "detail": str(e)}), 400
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return jsonify({"error": "Method not allowed"}), 405
+
+@app.errorhandler(500)
+def internal_error(e):
+    return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+
+
+# ── DB connection ─────────────────────────────────────────────────────────────
 _raw_db_url = os.environ.get("DATABASE_URL", "")
-
-# ── Startup diagnostic — visible in Render logs ──────────────────────────────
-print("=" * 60)
-print(f"[VitaTrack] DATABASE_URL set: {bool(_raw_db_url)}")
-if _raw_db_url:
-    _masked = _re.sub(r'(:)([^@]+)(@)', r'\1****\3', _raw_db_url)
-    print(f"[VitaTrack] DATABASE_URL (masked): {_masked}")
-    print(f"[VitaTrack] Starts with postgresql://: {_raw_db_url.startswith('postgresql://')}")
-    print(f"[VitaTrack] Starts with postgres://  : {_raw_db_url.startswith('postgres://')}")
-else:
-    print("[VitaTrack] DATABASE_URL is EMPTY — connection will fail")
-print("=" * 60)
-# ─────────────────────────────────────────────────────────────────────────────
-
 if not _raw_db_url:
     raise RuntimeError(
-        "\n\n*** DATABASE_URL environment variable is not set! ***\n"
-        "Get your connection string from neon.tech → your project → "
-        "Connection string (Pooled connection) and add it as DATABASE_URL "
-        "in your Render Flask service → Environment.\n"
+        "DATABASE_URL is not set. Add it in Render → Flask service → Environment."
     )
 DATABASE_URL = _raw_db_url.replace("postgres://", "postgresql://", 1)
 
 def get_db():
-    """
-    Connect using the full DATABASE_URL as-is.
-    Neon URLs already contain ?sslmode=require so we must NOT also pass
-    sslmode as a keyword argument — psycopg2 treats the two sources as
-    conflicting and falls back to a localhost connection instead of
-    using the URL. Let the URL carry all connection parameters.
-    """
     conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
     return conn
 
-# ─── Schema init ─────────────────────────────────────────────────────────────────
+# ── Schema ────────────────────────────────────────────────────────────────────
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id          TEXT PRIMARY KEY,
@@ -115,7 +128,7 @@ def init_db():
     cur  = conn.cursor()
     cur.execute(SCHEMA)
 
-    # Seed default admin if not exists
+    # Seed default admin
     cur.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1")
     if not cur.fetchone():
         uid = str(uuid.uuid4())
@@ -125,7 +138,7 @@ def init_db():
             VALUES (%s, %s, %s, %s, %s, %s, TRUE)
         """, (uid, "System Admin", "admin@vitatrack.com", pw, "admin", "Administrator"))
 
-    # Seed default developer if not exists
+    # Seed default developer
     cur.execute("SELECT id FROM users WHERE role = 'developer' LIMIT 1")
     if not cur.fetchone():
         uid = str(uuid.uuid4())
@@ -139,7 +152,6 @@ def init_db():
     cur.close()
     conn.close()
 
-# Run schema init on startup
 try:
     init_db()
 except Exception as e:
@@ -150,46 +162,9 @@ def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
 
 
-# ══════════════════════════════════════════════════════════════════════════════════
-# DEBUG — visit /debug in browser to diagnose connection issues
-# Remove this route once everything is working
-# ══════════════════════════════════════════════════════════════════════════════════
-
-@app.route('/debug', methods=['GET'])
-def debug():
-    import re
-    raw = os.environ.get("DATABASE_URL", "")
-
-    # Mask the password so credentials aren't exposed
-    masked = re.sub(r'(:)([^@]+)(@)', r'\1****\3', raw) if raw else "NOT SET"
-
-    result = {
-        "DATABASE_URL_set": bool(raw),
-        "DATABASE_URL_masked": masked,
-        "starts_with_postgres": raw.startswith("postgres"),
-        "after_prefix_fix": raw.replace("postgres://", "postgresql://", 1)[:40] + "..." if raw else "N/A",
-    }
-
-    # Try actually connecting
-    try:
-        conn = get_db()
-        cur  = conn.cursor()
-        cur.execute("SELECT version()")
-        version = cur.fetchone()
-        cur.close()
-        conn.close()
-        result["connection"] = "SUCCESS"
-        result["pg_version"]  = str(version)
-    except Exception as e:
-        result["connection"] = "FAILED"
-        result["error"]      = str(e)
-
-    return jsonify(result), 200
-
-
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # AUTH
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/auth/signup', methods=['POST'])
 def signup():
@@ -228,10 +203,6 @@ def signup():
 
 @app.route('/auth/verify', methods=['POST'])
 def verify_session():
-    """
-    Called by Streamlit on page refresh to validate a stored cookie.
-    Accepts a user_id and returns the fresh user record if still valid and approved.
-    """
     try:
         data    = request.get_json()
         user_id = data.get('user_id')
@@ -279,7 +250,6 @@ def login():
             return jsonify({"error": "Account pending admin approval."}), 403
 
         safe = {k: v for k, v in user.items() if k not in ('password', 'photo')}
-        # Convert datetime to string
         if safe.get('created_at'):
             safe['created_at'] = safe['created_at'].isoformat()
         return jsonify({"message": "Login successful.", "user": safe}), 200
@@ -301,9 +271,9 @@ def get_photo(user_id):
         return jsonify({"error": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # ADMIN — USERS
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/admin/users', methods=['GET'])
 def list_users():
@@ -334,64 +304,11 @@ def reject_user(user_id):
     cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
     conn.commit(); cur.close(); conn.close()
     return jsonify({"message": "User removed."}), 200
-    
-@app.route('/alerts', methods=['GET'])
-def get_alerts():
-    try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 100")
-        rows = cur.fetchall()
-        cur.close(); conn.close()
-        result = []
-        for row in rows:
-            d = dict(row)
-            if d.get('timestamp'):
-                d['timestamp'] = d['timestamp'].isoformat()
-            result.append(d)
-        return jsonify(result), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
-@app.route('/alerts', methods=['POST'])
-def create_alert():
-    try:
-        data    = request.get_json()
-        message = data.get('message', '').strip()
-        if not message:
-            return jsonify({"error": "message required"}), 400
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("INSERT INTO alerts (message) VALUES (%s)", (message,))
-        conn.commit(); cur.close(); conn.close()
-        return jsonify({"message": "Alert saved"}), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/alerts/<int:alert_id>/dismiss', methods=['POST'])
-def dismiss_alert(alert_id):
-    try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("UPDATE alerts SET dismissed = TRUE WHERE id = %s", (alert_id,))
-        conn.commit(); cur.close(); conn.close()
-        return jsonify({"message": "Alert dismissed"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/alerts/clear', methods=['POST'])
-def clear_alerts():
-    try:
-        conn = get_db(); cur = conn.cursor()
-        cur.execute("DELETE FROM alerts")
-        conn.commit(); cur.close(); conn.close()
-        return jsonify({"message": "All alerts cleared"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # ADMIN — PATIENTS
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 def get_patients_with_staff(conn):
     cur = conn.cursor()
@@ -488,9 +405,9 @@ def assign_staff():
         return jsonify({"error": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # ADMIN — DEVICES
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/admin/devices', methods=['GET'])
 def list_devices():
@@ -533,7 +450,6 @@ def assign_device():
         device_id  = data.get('device_id')
         patient_id = data.get('patient_id')
         conn = get_db(); cur = conn.cursor()
-        # Clear old assignment
         cur.execute("UPDATE patients SET device_id = NULL WHERE device_id = %s", (device_id,))
         cur.execute("UPDATE devices  SET patient_id = %s WHERE device_id = %s", (patient_id, device_id))
         cur.execute("UPDATE patients SET device_id  = %s WHERE id = %s",        (device_id, patient_id))
@@ -543,27 +459,98 @@ def assign_device():
         return jsonify({"error": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# PROFILE
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/profile/change_password', methods=['POST'])
+def change_password():
+    try:
+        data       = request.get_json()
+        user_id    = data.get('user_id')
+        current_pw = data.get('current_password', '')
+        new_pw     = data.get('new_password', '')
+
+        if not all([user_id, current_pw, new_pw]):
+            return jsonify({"error": "All fields are required."}), 400
+        if len(new_pw) < 6:
+            return jsonify({"error": "New password must be at least 6 characters."}), 400
+
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT password FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if not row:
+            cur.close(); conn.close()
+            return jsonify({"error": "User not found."}), 404
+        if row['password'] != hash_pw(current_pw):
+            cur.close(); conn.close()
+            return jsonify({"error": "Current password is incorrect."}), 401
+
+        cur.execute("UPDATE users SET password = %s WHERE id = %s",
+                    (hash_pw(new_pw), user_id))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "Password updated successfully."}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/profile/change_photo', methods=['POST'])
+def change_photo():
+    try:
+        data      = request.get_json()
+        user_id   = data.get('user_id')
+        photo_b64 = data.get('photo_b64')
+
+        if not user_id or not photo_b64:
+            return jsonify({"error": "user_id and photo_b64 are required."}), 400
+
+        photo_bytes = base64.b64decode(photo_b64)
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("UPDATE users SET photo = %s WHERE id = %s",
+                    (psycopg2.Binary(photo_bytes), user_id))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "Photo updated successfully."}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # VITALS
-# ══════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/data', methods=['POST'])
 def receive_data():
+    """
+    Receives vitals from the hub (HR + SpO2 + temp + resp in one POST).
+    All fields are optional — stores NULL for missing/N/A values.
+    """
     try:
-        data = request.get_json()
+        data = request.get_json(force=True, silent=True) or {}
+
+        def to_float(val):
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                return f if f >= 0 else None
+            except (ValueError, TypeError):
+                return None  # handles "N/A", "", etc.
+
+        temperature      = to_float(data.get('temperature'))
+        blood_oxygen     = to_float(data.get('blood_oxygen'))
+        heart_rate       = to_float(data.get('heart_rate'))
+        respiration_rate = to_float(data.get('respiration_rate'))
+        blood_pressure   = data.get('blood_pressure')
+        device_id        = str(data.get('device_id', 'UNKNOWN')).strip()
+
         conn = get_db(); cur = conn.cursor()
         cur.execute("""
             INSERT INTO vitals
-                (temperature, blood_oxygen, heart_rate, respiration_rate, blood_pressure, device_id)
+                (temperature, blood_oxygen, heart_rate,
+                 respiration_rate, blood_pressure, device_id)
             VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            data.get('temperature'),
-            data.get('blood_oxygen'),
-            data.get('heart_rate'),
-            data.get('respiration_rate'),
-            data.get('blood_pressure'),
-            data.get('device_id', 'UNKNOWN')
-        ))
+        """, (temperature, blood_oxygen, heart_rate,
+              respiration_rate, blood_pressure, device_id))
         conn.commit(); cur.close(); conn.close()
         return jsonify({"message": "Data received successfully"}), 200
     except Exception as e:
@@ -572,31 +559,37 @@ def receive_data():
 
 @app.route('/vitals', methods=['GET'])
 def get_vitals():
-    """Return vitals as CSV. Optional ?device_id=XXX filter."""
+    """
+    Return vitals history as CSV for Streamlit dashboard.
+    Optional ?device_id=XXX filter.
+    """
     try:
         device_filter = request.args.get('device_id')
         conn = get_db(); cur = conn.cursor()
         if device_filter:
             cur.execute("""
-                SELECT timestamp AS "Timestamp",
-                       temperature AS "Temperature",
-                       blood_oxygen AS "Blood Oxygen",
-                       heart_rate AS "Heart Rate",
-                       respiration_rate AS "Respiration Rate",
-                       blood_pressure AS "Blood Pressure",
-                       device_id AS "Device ID"
-                FROM vitals WHERE device_id = %s ORDER BY timestamp
+                SELECT timestamp         AS "Timestamp",
+                       temperature       AS "Temperature",
+                       blood_oxygen      AS "Blood Oxygen",
+                       heart_rate        AS "Heart Rate",
+                       respiration_rate  AS "Respiration Rate",
+                       blood_pressure    AS "Blood Pressure",
+                       device_id         AS "Device ID"
+                FROM vitals
+                WHERE device_id = %s
+                ORDER BY timestamp
             """, (device_filter,))
         else:
             cur.execute("""
-                SELECT timestamp AS "Timestamp",
-                       temperature AS "Temperature",
-                       blood_oxygen AS "Blood Oxygen",
-                       heart_rate AS "Heart Rate",
-                       respiration_rate AS "Respiration Rate",
-                       blood_pressure AS "Blood Pressure",
-                       device_id AS "Device ID"
-                FROM vitals ORDER BY timestamp
+                SELECT timestamp         AS "Timestamp",
+                       temperature       AS "Temperature",
+                       blood_oxygen      AS "Blood Oxygen",
+                       heart_rate        AS "Heart Rate",
+                       respiration_rate  AS "Respiration Rate",
+                       blood_pressure    AS "Blood Pressure",
+                       device_id         AS "Device ID"
+                FROM vitals
+                ORDER BY timestamp
             """)
         rows = cur.fetchall()
         cur.close(); conn.close()
@@ -605,7 +598,6 @@ def get_vitals():
             return jsonify({"error": "No data available"}), 404
 
         output = io.StringIO()
-        import csv as csv_mod
         writer = csv_mod.DictWriter(output, fieldnames=rows[0].keys())
         writer.writeheader()
         for row in rows:
@@ -614,6 +606,174 @@ def get_vitals():
                 d['Timestamp'] = d['Timestamp'].isoformat()
             writer.writerow(d)
         return Response(output.getvalue(), mimetype='text/csv')
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/vitals/latest', methods=['GET'])
+def get_latest_vitals():
+    """
+    Return the most recent N vitals as JSON.
+    Used by the hub to fetch latest temperature and respiration
+    from Flask before composing its own POST.
+
+    Query params:
+      ?device_id=ESP32-001   — filter by device (recommended)
+      ?limit=20              — max rows to return (default 20, max 100)
+
+    Returns a JSON array ordered newest first.
+    The hub scans backwards for the first non-null temperature value.
+    """
+    try:
+        device_filter = request.args.get('device_id')
+        limit = min(int(request.args.get('limit', 20)), 100)
+
+        conn = get_db(); cur = conn.cursor()
+        if device_filter:
+            cur.execute("""
+                SELECT timestamp, temperature, blood_oxygen,
+                       heart_rate, respiration_rate,
+                       blood_pressure, device_id
+                FROM vitals
+                WHERE device_id = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """, (device_filter, limit))
+        else:
+            cur.execute("""
+                SELECT timestamp, temperature, blood_oxygen,
+                       heart_rate, respiration_rate,
+                       blood_pressure, device_id
+                FROM vitals
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """, (limit,))
+
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+
+        if not rows:
+            return jsonify([]), 200
+
+        result = []
+        for row in rows:
+            d = dict(row)
+            if hasattr(d.get('timestamp'), 'isoformat'):
+                d['timestamp'] = d['timestamp'].isoformat()
+            # Convert None to "N/A" string for consistent hub parsing
+            for key in ['temperature', 'blood_oxygen', 'heart_rate', 'respiration_rate']:
+                if d[key] is None:
+                    d[key] = "N/A"
+                else:
+                    d[key] = str(d[key])
+            result.append(d)
+
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/vitals/summary', methods=['GET'])
+def get_vitals_summary():
+    """
+    Return the single latest reading per device as JSON.
+    Useful for Streamlit home page to show current vitals quickly.
+    Optional ?device_id=XXX to get summary for one device.
+    """
+    try:
+        device_filter = request.args.get('device_id')
+        conn = get_db(); cur = conn.cursor()
+
+        if device_filter:
+            cur.execute("""
+                SELECT DISTINCT ON (device_id)
+                       timestamp, temperature, blood_oxygen,
+                       heart_rate, respiration_rate,
+                       blood_pressure, device_id
+                FROM vitals
+                WHERE device_id = %s
+                ORDER BY device_id, timestamp DESC
+            """, (device_filter,))
+        else:
+            cur.execute("""
+                SELECT DISTINCT ON (device_id)
+                       timestamp, temperature, blood_oxygen,
+                       heart_rate, respiration_rate,
+                       blood_pressure, device_id
+                FROM vitals
+                ORDER BY device_id, timestamp DESC
+            """)
+
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+
+        result = []
+        for row in rows:
+            d = dict(row)
+            if hasattr(d.get('timestamp'), 'isoformat'):
+                d['timestamp'] = d['timestamp'].isoformat()
+            result.append(d)
+
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ALERTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/alerts', methods=['GET'])
+def get_alerts():
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 100")
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        result = []
+        for row in rows:
+            d = dict(row)
+            if d.get('timestamp'):
+                d['timestamp'] = d['timestamp'].isoformat()
+            result.append(d)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/alerts', methods=['POST'])
+def create_alert():
+    try:
+        data    = request.get_json()
+        message = data.get('message', '').strip()
+        if not message:
+            return jsonify({"error": "message required"}), 400
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("INSERT INTO alerts (message) VALUES (%s)", (message,))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "Alert saved"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/alerts/<int:alert_id>/dismiss', methods=['POST'])
+def dismiss_alert(alert_id):
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("UPDATE alerts SET dismissed = TRUE WHERE id = %s", (alert_id,))
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "Alert dismissed"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/alerts/clear', methods=['POST'])
+def clear_alerts():
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("DELETE FROM alerts")
+        conn.commit(); cur.close(); conn.close()
+        return jsonify({"message": "All alerts cleared"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
