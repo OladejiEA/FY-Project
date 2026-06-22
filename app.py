@@ -5,25 +5,33 @@ VitaTrack Flask Backend
 - Compatible with Render.com free PostgreSQL add-on
 """
 
-from flask import Flask, request, jsonify, send_file, Response
+from flask import Flask, request, jsonify, Response
 from datetime import datetime
 import os, hashlib, uuid, io, base64, csv as csv_mod, time
+from collections import defaultdict
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# ── Simple in-memory throttle for frequently-polled GET endpoints ─────────────
-_last_request_time = {}
-THROTTLE_SECONDS   = 2  # minimum gap per IP per endpoint
+# ── Improved Throttle ───────────────────────────────────────────────────────
+_last_request_time = defaultdict(lambda: 0)
+THROTTLE_SECONDS = 1.0  # Relaxed + more tolerant
 
 def throttle_check():
-    ip  = request.remote_addr or "unknown"
+    ip = request.remote_addr or "unknown"
     key = f"{ip}:{request.path}"
     now = time.time()
-    last = _last_request_time.get(key, 0)
+    last = _last_request_time[key]
+    
     if now - last < THROTTLE_SECONDS:
-        return jsonify({"error": "Too many requests"}), 429
+        return jsonify({
+            "error": "Too many requests",
+            "detail": "Please wait a moment",
+            "retry_after": THROTTLE_SECONDS
+        }), 429
+    
     _last_request_time[key] = now
     return None
 
@@ -34,8 +42,7 @@ def before_request():
         if result:
             return result
 
-
-# ── Global error handlers — always return JSON, never HTML ────────────────────
+# ── Global error handlers ────────────────────────────────────────────────────
 @app.errorhandler(400)
 def bad_request(e):
     return jsonify({"error": "Bad request", "detail": str(e)}), 400
@@ -48,17 +55,22 @@ def not_found(e):
 def method_not_allowed(e):
     return jsonify({"error": "Method not allowed"}), 405
 
+@app.errorhandler(429)
+def too_many_requests(e):
+    return jsonify({
+        "error": "Too many requests",
+        "detail": "Please wait a moment before refreshing."
+    }), 429
+
 @app.errorhandler(500)
 def internal_error(e):
     return jsonify({"error": "Internal server error", "detail": str(e)}), 500
 
-
 # ── DB connection ─────────────────────────────────────────────────────────────
 _raw_db_url = os.environ.get("DATABASE_URL", "")
 if not _raw_db_url:
-    raise RuntimeError(
-        "DATABASE_URL is not set. Add it in Render → Flask service → Environment."
-    )
+    raise RuntimeError("DATABASE_URL is not set.")
+
 DATABASE_URL = _raw_db_url.replace("postgres://", "postgresql://", 1)
 
 def get_db():
