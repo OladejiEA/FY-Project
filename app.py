@@ -5,7 +5,7 @@ VitaTrack Flask Backend
 - Compatible with Render.com free PostgreSQL add-on
 - Device ID whitelist removed — accepts any non-empty device_id
 - Calibration stored per device per parameter; applied at display layer (Streamlit)
-- Temperature back-filled from latest reading when hub sends N/A
+- Temperature and respiration back-filled from latest readings when hub sends N/A
 """
 
 from flask import Flask, request, jsonify, Response
@@ -500,9 +500,10 @@ def change_photo():
 def receive_data():
     """
     Accept vitals from any module (hub, temp, belt).
-    If temperature arrives as N/A (hub hardware limitation), back-fill
-    from the most recent non-null temperature already in the database
-    so the dashboard always has a temperature value on hub rows.
+    All three now post directly to Flask independently.
+    If temperature or respiration_rate arrive as N/A (hub hardware
+    limitation), back-fill from the most recent non-null value already
+    in the database so the dashboard always has complete rows.
     """
     try:
         data = request.get_json(force=True, silent=True) or {}
@@ -527,7 +528,7 @@ def receive_data():
 
         conn = get_db(); cur = conn.cursor()
 
-        # ── Back-fill temperature from latest reading if hub sent N/A ─────────
+        # ── Back-fill temperature if hub sent N/A ─────────────────────────────
         if temperature is None:
             cur.execute(
                 "SELECT temperature FROM vitals "
@@ -537,6 +538,17 @@ def receive_data():
             row = cur.fetchone()
             if row:
                 temperature = row['temperature']
+
+        # ── Back-fill respiration if hub sent N/A ─────────────────────────────
+        if respiration_rate is None:
+            cur.execute(
+                "SELECT respiration_rate FROM vitals "
+                "WHERE respiration_rate IS NOT NULL "
+                "ORDER BY timestamp DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if row:
+                respiration_rate = row['respiration_rate']
 
         cur.execute("""INSERT INTO vitals
             (temperature, blood_oxygen, heart_rate, respiration_rate, blood_pressure, device_id)
